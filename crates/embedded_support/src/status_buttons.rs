@@ -14,23 +14,6 @@ use crate::scaffold;
 
 const EMBEDDED_ADAPTER: &str = "yz61-embedded";
 
-pub fn init(cx: &mut App) {
-    log::info!("embedded_support: init called");
-    cx.observe_new(|workspace: &mut Workspace, window, cx: &mut Context<Workspace>| {
-        log::info!(
-            "embedded_support: workspace created (window present: {})",
-            window.is_some()
-        );
-        let Some(window) = window else { return };
-        let buttons = cx.new(|cx| EmbeddedButtons::new(workspace, window, cx));
-        workspace.status_bar().update(cx, |status_bar, cx| {
-            status_bar.add_left_item(buttons, window, cx);
-            log::info!("embedded_support: buttons registered in status bar");
-        });
-    })
-    .detach();
-}
-
 pub struct EmbeddedButtons {
     workspace: WeakEntity<Workspace>,
     visible: bool,
@@ -40,7 +23,9 @@ pub struct EmbeddedButtons {
 }
 
 impl EmbeddedButtons {
-    fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// 由 zed.rs 的 initialize_workspace 在诊断指示器注册之后调用，
+    /// 使按钮出现在 Project Diagnostics 图标的右侧。
+    pub fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             workspace: workspace.weak_handle(),
             visible: false,
@@ -122,6 +107,21 @@ impl EmbeddedButtons {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
+        // 调试适配器由 yz61-embedded 扩展提供；扩展未加载时给出明确提示
+        //（DebugPanel::start_session 对缺失适配器是静默返回的）。
+        if dap::DapRegistry::global(cx).adapter(EMBEDDED_ADAPTER).is_none() {
+            log::error!("embedded_support: adapter '{}' not registered", EMBEDDED_ADAPTER);
+            workspace.update(cx, |workspace, cx| {
+                workspace.show_error(
+                    anyhow::anyhow!(
+                        "未找到 yz61-embedded 调试适配器：请打开扩展面板，\
+                         对 yz61-embedded 执行 Reinstall Dev Extension 后重试"
+                    ),
+                    cx,
+                );
+            });
+            return;
+        }
         let Some(provider) = workspace.read(cx).debugger_provider() else {
             window.dispatch_action(debugger_ui::Start.boxed_clone(), cx);
             return;
@@ -153,6 +153,10 @@ impl EmbeddedButtons {
                 })
                 .await;
             let (scenarios, _) = listing;
+            log::info!(
+                "embedded_support: {} debug scenario(s) found",
+                scenarios.len()
+            );
             let chosen = scenarios
                 .iter()
                 .find(|(scenario, _)| scenario.adapter == EMBEDDED_ADAPTER)

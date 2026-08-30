@@ -3,11 +3,12 @@
 //! 与调试配置（基于 CMakePresets.json 发现多芯片目标）。
 
 mod scaffold;
-mod status_buttons;
+pub mod status_buttons;
+
+pub use status_buttons::EmbeddedButtons;
 
 use gpui::App;
 
 pub fn init(cx: &mut App) {
     scaffold::init(cx);
-    status_buttons::init(cx);
 }

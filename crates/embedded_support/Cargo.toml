@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+dap.workspace = true
 debugger_ui.workspace = true
 gpui.workspace = true
 icons.workspace = true
