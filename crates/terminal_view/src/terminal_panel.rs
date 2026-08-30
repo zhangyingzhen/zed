@@ -1283,14 +1283,39 @@ impl TerminalPanel {
 /// Prepares a `SpawnInTerminal` by computing the command, args, and command_label
 /// based on the shell configuration. This is a pure function that can be tested
 /// without spawning actual terminals.
+///
+/// The command label is the plain `command args` (no shell wrapping), and when
+/// `show_command` is set, the shell command is prefixed with an echo of the
+/// command line so it appears in the task output *before* the command's own
+/// output.
 pub fn prepare_task_for_spawn(
     task: &SpawnInTerminal,
     shell: &Shell,
     is_windows: bool,
 ) -> SpawnInTerminal {
     let builder = ShellBuilder::new(shell, is_windows);
-    let command_label = builder.command_label(task.command.as_deref().unwrap_or(""));
-    let (command, args) = builder.build_no_quote(task.command.clone(), &task.args);
+
+    let command_label = match task.command.as_deref() {
+        Some(command) if !command.trim().is_empty() => std::iter::once(command.to_string())
+            .chain(task.args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => builder.command_label(""),
+    };
+
+    let task_command = task.command.clone().map(|command| {
+        if !task.show_command {
+            return command;
+        }
+        let header = format!("{}Command: {command_label}", task::TASK_DELIMITER);
+        format!(
+            "{}{}{}",
+            builder.echo_command(&header),
+            builder.statement_separator(),
+            command
+        )
+    });
+    let (command, args) = builder.build_no_quote(task_command, &task.args);
 
     SpawnInTerminal {
         command_label,

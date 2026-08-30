@@ -3149,14 +3149,13 @@ impl Terminal {
             }
         };
 
-        let (finished_successfully, task_line, command_line) = task_summary(task, exit_status);
+        let (finished_successfully, task_line) = task_summary(task, exit_status);
         let mut lines_to_show = Vec::new();
         if task.spawned_task.show_summary {
             lines_to_show.push(task_line.as_str());
         }
-        if task.spawned_task.show_command {
-            lines_to_show.push(command_line.as_str());
-        }
+        // Note: the `⏵ Command: …` line is echoed by the shell when the task
+        // starts (see `prepare_task_for_spawn`), so it precedes the task output.
         let hide = task.spawned_task.hide;
 
         if !lines_to_show.is_empty() {
@@ -3205,14 +3204,14 @@ impl Terminal {
     }
 }
 
-const TASK_DELIMITER: &str = "⏵ ";
-fn task_summary(task: &TaskState, exit_status: Option<ExitStatus>) -> (bool, String, String) {
+fn task_summary(task: &TaskState, exit_status: Option<ExitStatus>) -> (bool, String) {
     let escaped_full_label = task
         .spawned_task
         .full_label
         .replace("\r\n", "\r")
         .replace('\n', "\r");
-    let task_label = |suffix: &str| format!("{TASK_DELIMITER}Task `{escaped_full_label}` {suffix}");
+    let task_label =
+        |suffix: &str| format!("{}Task `{escaped_full_label}` {suffix}", task::TASK_DELIMITER);
     let (success, task_line) = match exit_status {
         Some(status) => {
             let code = status.code();
@@ -3236,13 +3235,7 @@ fn task_summary(task: &TaskState, exit_status: Option<ExitStatus>) -> (bool, Str
         }
         None => (false, task_label("finished")),
     };
-    let escaped_command_label = task
-        .spawned_task
-        .command_label
-        .replace("\r\n", "\r")
-        .replace('\n', "\r");
-    let command_line = format!("{TASK_DELIMITER}Command: {escaped_command_label}");
-    (success, task_line, command_line)
+    (success, task_line)
 }
 
 /// Converts bare LFs into CRLFs so output captured from a pipe (rather than a

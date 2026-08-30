@@ -17,6 +17,10 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
+/// Prefix for task-related lines printed in task terminals
+/// (e.g. `` ⏵ Task `x` finished successfully ``).
+pub const TASK_DELIMITER: &str = "⏵ ";
+
 pub use adapter_schema::{AdapterSchema, AdapterSchemas};
 pub use debug_format::{
     AttachRequest, BuildTaskDefinition, DebugRequest, DebugScenario, DebugTaskFile, LaunchRequest,

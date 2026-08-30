@@ -38,6 +38,27 @@ impl ShellBuilder {
         self
     }
 
+    /// Returns a shell command that prints `text` as a single line, properly
+    /// quoted for this shell. Used to echo informational lines (e.g. the task
+    /// command header) before running the actual task command.
+    pub fn echo_command(&self, text: &str) -> String {
+        match self.kind {
+            ShellKind::PowerShell | ShellKind::Pwsh => {
+                format!("Write-Output '{}'", text.replace('\'', "''"))
+            }
+            ShellKind::Cmd => format!("echo {}", text.replace('"', "")),
+            _ => format!("echo '{}'", text.replace('\'', r"\'")),
+        }
+    }
+
+    /// Returns the separator used to chain two statements in this shell.
+    pub fn statement_separator(&self) -> &'static str {
+        match self.kind {
+            ShellKind::Cmd => " & ",
+            _ => "; ",
+        }
+    }
+
     /// Returns the label to show in the terminal tab
     pub fn command_label(&self, command_to_use_in_label: &str) -> String {
         if command_to_use_in_label.trim().is_empty() {
