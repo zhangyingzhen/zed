@@ -15,11 +15,17 @@ use crate::scaffold;
 const EMBEDDED_ADAPTER: &str = "yz61-embedded";
 
 pub fn init(cx: &mut App) {
+    log::info!("embedded_support: init called");
     cx.observe_new(|workspace: &mut Workspace, window, cx: &mut Context<Workspace>| {
+        log::info!(
+            "embedded_support: workspace created (window present: {})",
+            window.is_some()
+        );
         let Some(window) = window else { return };
         let buttons = cx.new(|cx| EmbeddedButtons::new(workspace, window, cx));
         workspace.status_bar().update(cx, |status_bar, cx| {
-            status_bar.add_right_item(buttons, window, cx);
+            status_bar.add_left_item(buttons, window, cx);
+            log::info!("embedded_support: buttons registered in status bar");
         });
     })
     .detach();
@@ -73,6 +79,11 @@ impl EmbeddedButtons {
         let root = worktree.read(cx).abs_path().to_path_buf();
 
         let visible = scaffold::is_embedded_project(&root);
+        log::info!(
+            "embedded_support: refresh root={} visible={}",
+            root.display(),
+            visible
+        );
         if visible {
             let labels = scaffold::read_tasks_labels(&root);
             self.build_task = labels

@@ -73,6 +73,10 @@ pub fn generate(workspace: &mut Workspace, cx: &mut App) -> Result<Option<String
         bail!("工作区没有可见的工程目录");
     };
     let root = worktree.read(cx).abs_path().to_path_buf();
+    log::info!(
+        "embedded_support: generate checking root={}",
+        root.display()
+    );
     if !is_embedded_project(&root) {
         return Ok(None);
     }
@@ -296,6 +300,7 @@ fn preset_tasks(
                 json!("download"),
                 json!("--chip"),
                 json!(chip),
+                json!("--reset"), // 烧录完成后复位并自动运行固件
             ];
             if let Some(speed) = speed {
                 flash_args.push(json!("--speed"));
@@ -418,7 +423,7 @@ fn default_tasks(
         {
             "label": "stm32: flash",
             "command": probe_rs,
-            "args": ["download", "--chip", chip, elf],
+            "args": ["download", "--chip", chip, "--reset", elf],
             "cwd": "$ZED_WORKTREE_ROOT",
             "reveal": "always"
         },
