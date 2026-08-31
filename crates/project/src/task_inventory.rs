@@ -1260,3 +1260,39 @@ mod tests {
         assert_eq!(reresolved, stale);
     }
 }
+
+    #[gpui::test]
+    fn debug_scenario_update_then_list_roundtrip(iter: &mut gpui::TestAppContext) {
+        let inventory = iter.update(Inventory::new);
+        let worktree_id = WorktreeId::from_usize(1);
+        let zed_dir = RelPath::from_unix_str(".zed").unwrap();
+        let raw = r#"[{"label":"vgt6: debug STM32F407VGT6","adapter":"yz61-embedded","request":"launch","chip":"STM32F407VG","program":"build/vgt6/ly3015-main.elf","stop_on_entry":false,"build":"vgt6: build"}]"#;
+
+        iter.update(|cx| {
+            inventory.update(cx, |inventory, _| {
+                inventory
+                    .update_file_based_scenarios(
+                        TaskSettingsLocation::Worktree(settings::SettingsLocation {
+                            worktree_id,
+                            path: &zed_dir,
+                        }),
+                        Some(raw),
+                    )
+                    .unwrap();
+            });
+        });
+
+        let contexts = TaskContexts {
+            active_worktree_context: Some((worktree_id, TaskContext::default())),
+            ..TaskContexts::default()
+        };
+        let listing = iter.update(|cx| {
+            inventory.update(cx, |inventory, cx| {
+                inventory.list_debug_scenarios(&contexts, vec![], vec![], false, cx)
+            })
+        });
+        let (recent, file_based) = futures::executor::block_on(listing);
+        assert_eq!(file_based.len(), 1, "file-based scenarios must be listed, got {file_based:?}");
+        assert_eq!(file_based[0].1.adapter.as_ref(), "yz61-embedded");
+        let _ = recent;
+    }

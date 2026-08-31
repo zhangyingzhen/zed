@@ -14,6 +14,84 @@ use crate::scaffold;
 
 const EMBEDDED_ADAPTER: &str = "yz61-embedded";
 
+/// 定位工程里的 main 函数并在其所在行添加断点（已存在则不动）。
+/// 失败静默跳过（找不到 main 或无法打开 buffer 都不阻断调试启动）。
+async fn ensure_main_breakpoint(
+    workspace: &gpui::WeakEntity<Workspace>,
+    cx: &mut gpui::AsyncApp,
+) {
+    let open_task = workspace.update(cx, |workspace, cx| {
+        let Some(worktree) = workspace.visible_worktrees(cx).next() else {
+            return None;
+        };
+        let root = worktree.read(cx).abs_path().to_path_buf();
+        let main_rel = scaffold::find_main_source(&root)?;
+        let worktree_id = worktree.read(cx).id();
+        let rel_path = util::rel_path::RelPath::from_unix_str(&main_rel).ok()?;
+        let project = workspace.project().clone();
+        let open = project.update(cx, |project, cx| {
+            project.open_buffer(
+                project::ProjectPath {
+                    worktree_id,
+                    path: std::sync::Arc::from(rel_path),
+                },
+                cx,
+            )
+        });
+        Some(open)
+    });
+    let Ok(Some(open_task)) = open_task else {
+        return;
+    };
+    let Ok(buffer) = open_task.await else {
+        return;
+    };
+    let _ = workspace.update(cx, |workspace, cx| {
+        use project::debugger::breakpoint_store::{
+            Breakpoint, BreakpointEditAction, BreakpointStore, BreakpointWithPosition,
+        };
+        let buffer_snapshot = buffer.read(cx).snapshot();
+        let text = buffer_snapshot.text();
+        let Some(row) = text
+            .lines()
+            .position(|line| line.contains("int main(") || line.contains("void main("))
+        else {
+            return;
+        };
+        let row = row as u32;
+        let breakpoint_store = workspace
+            .project()
+            .read(cx)
+            .dap_store()
+            .read(cx)
+            .breakpoint_store()
+            .clone();
+        let Some(abs_path) = BreakpointStore::abs_path_from_buffer(&buffer, cx) else {
+            return;
+        };
+        if breakpoint_store
+            .read(cx)
+            .breakpoint_at_row(&abs_path, row, cx)
+            .is_some()
+        {
+            return;
+        }
+        let anchor = buffer_snapshot.anchor_after(language::PointUtf16::new(row, 0));
+        breakpoint_store.update(cx, |store, cx| {
+            store.toggle_breakpoint(
+                buffer.clone(),
+                BreakpointWithPosition {
+                    position: anchor,
+                    bp: Breakpoint::new_standard(),
+                },
+                BreakpointEditAction::Toggle,
+                cx,
+            );
+        });
+        log::info!("embedded_support: added main breakpoint at row {}", row + 1);
+    });
+}
+
 pub struct EmbeddedButtons {
     workspace: WeakEntity<Workspace>,
     visible: bool,
@@ -147,6 +225,12 @@ impl EmbeddedButtons {
                 return;
             };
             let contexts = task_contexts_fut.await;
+            log::info!(
+                "embedded_support: contexts worktree={:?} active_ctx={} other_ctxs={}",
+                contexts.worktree(),
+                contexts.active_worktree_context.is_some(),
+                contexts.other_worktree_contexts.len()
+            );
             let listing = inventory
                 .update(cx, |inventory, cx| {
                     inventory.list_debug_scenarios(&contexts, vec![], vec![], false, cx)
@@ -163,8 +247,21 @@ impl EmbeddedButtons {
                 .or_else(|| scenarios.first())
                 .cloned();
             let Some((scenario, context)) = chosen else {
+                // 一个场景都没查到（例如 debug.json 尚未加载进 Inventory）：
+                // 回退到官方面板，避免按钮无反应。
+                log::warn!("embedded_support: no debug scenarios, falling back to debugger::Start");
+                workspace
+                    .update_in(cx, |_workspace, window, cx| {
+                        window.dispatch_action(debugger_ui::Start.boxed_clone(), cx);
+                    })
+                    .ok();
                 return;
             };
+
+            // 启动前确保 main 处有断点：launch 后 Zed 会在 configurationDone 前
+            // 把断点发给 probe-rs，固件跑到 main 即停（等效“停在入口”）。
+            ensure_main_breakpoint(&workspace.downgrade(), cx).await;
+
             workspace
                 .update_in(cx, |_workspace, window, cx| {
                     provider.start_session(

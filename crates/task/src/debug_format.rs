@@ -532,3 +532,27 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod ly_parse_tests {
+    use super::*;
+
+#[test]
+fn parse_ly3015_debug_json() {
+    let raw = r#"[
+      {
+        "label": "vgt6: debug STM32F407VGT6",
+        "adapter": "yz61-embedded",
+        "request": "launch",
+        "chip": "STM32F407VG",
+        "program": "build/vgt6/ly3015-main.elf",
+        "stop_on_entry": false,
+        "build": "vgt6: build"
+      }
+    ]"#;
+    let file: DebugTaskFile = serde_json::from_str(raw).unwrap();
+    assert_eq!(file.0.len(), 1, "scenario must parse");
+    assert_eq!(file.0[0].adapter.as_ref(), "yz61-embedded");
+    assert!(matches!(file.0[0].build, Some(BuildTaskDefinition::ByName(_))));
+}
+}

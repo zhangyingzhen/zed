@@ -533,3 +533,67 @@ fn find_file(dir: &Path, name: &str, depth: u8) -> Option<PathBuf> {
     }
     None
 }
+
+/// 在工程里定位含 `int main(` 的 C 源文件，返回 worktree 相对的 unix 风格路径。
+/// 优先常见路径，其次浅层递归（跳过 build/.git 等目录）。
+pub fn find_main_source(root: &Path) -> Option<String> {
+    let candidates = [
+        "Core/Src/main.c",
+        "src/main.c",
+        "Src/main.c",
+        "User/main.c",
+        "main.c",
+    ];
+    for candidate in candidates {
+        let path = root.join(candidate);
+        if path.is_file() && source_contains_main(&path) {
+            return Some(candidate.to_string());
+        }
+    }
+    fn walk(dir: &Path, root: &Path, depth: u8, found: &mut Option<String>) {
+        if depth == 0 || found.is_some() {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut subdirs = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if path.is_dir() {
+                if matches!(
+                    name.as_ref(),
+                    "build" | ".git" | ".zed" | "Drivers" | "Middlewares" | "node_modules"
+                ) || name.starts_with('.')
+                {
+                    continue;
+                }
+                subdirs.push(path);
+            } else if name.as_ref().ends_with(".c") && source_contains_main(&path) {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    *found = Some(rel.to_string_lossy().replace('\\', "/"));
+                }
+                return;
+            }
+        }
+        for sub in subdirs {
+            walk(&sub, root, depth - 1, found);
+            if found.is_some() {
+                return;
+            }
+        }
+    }
+    let mut found = None;
+    walk(root, root, 5, &mut found);
+    found
+}
+
+fn source_contains_main(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    text.lines()
+        .any(|line| line.contains("int main(") || line.contains("void main("))
+}

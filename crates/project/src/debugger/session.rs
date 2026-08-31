@@ -2254,7 +2254,50 @@ impl Session {
 
         let task = match &mut self.state {
             SessionState::Running(_) => {
-                if self
+                if self.adapter().as_ref() == "yz61-embedded" {
+                    // 嵌入式目标（probe-rs）：结束调试时让固件继续运行。
+                    // probe-rs 在收到 terminate_debuggee=true 时会把芯片 halt 在原地，
+                    // 所以先对第一个线程发 continue 恢复运行，再以 terminate=false 断开。
+                    cx.spawn(async move |this, cx| {
+                        let continue_task = this.update(cx, |this, cx| {
+                            this.request(
+                                ContinueCommand {
+                                args: ContinueArguments {
+                                    thread_id: 1,
+                                    single_thread: Some(false),
+                                },
+                                },
+                                |_this,
+                                 res: Result<
+                                    <ContinueCommand as LocalDapCommand>::Response,
+                                >,
+                                 _cx| {
+                                    res.log_err();
+                                    None
+                                },
+                                cx,
+                            )
+                        });
+                        if let Ok(task) = continue_task {
+                            let _ = task.await;
+                        }
+                        let disconnect_task = this.update(cx, |this, cx| {
+                            this.request(
+                                DisconnectCommand {
+                                    restart: Some(false),
+                                    terminate_debuggee: Some(false),
+                                    suspend_debuggee: Some(false),
+                                },
+                                Self::clear_active_debug_line_response,
+                                cx,
+                            )
+                        });
+                        match disconnect_task {
+                            Ok(task) => task.await,
+                            Err(_) => None,
+                        }
+                    })
+                } else if self
                     .capabilities
                     .supports_terminate_request
                     .unwrap_or_default()
