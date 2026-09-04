@@ -5768,17 +5768,22 @@ name = "embedded_support"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dap",
  "debugger_ui",
  "gpui",
  "icons",
+ "language",
  "log",
  "project",
  "serde_json",
  "task",
  "tasks_ui",
+ "tempfile",
  "ui",
+ "util",
  "which",
  "workspace",
+ "worktree",
 ]
 
 [[package]]

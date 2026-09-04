@@ -2,12 +2,12 @@
 //! 仅当当前工作区被识别为嵌入式工程时渲染（见 scaffold::is_embedded_project）。
 
 use gpui::{
-    div, Action, App, ClickEvent, Context, IntoElement, ParentElement as _, Render, Styled as _,
-    Subscription, WeakEntity, Window,
+    Action, App, ClickEvent, Context, IntoElement, ParentElement as _, Render, Styled as _,
+    Subscription, WeakEntity, Window, div,
 };
 use icons::IconName;
 use project::worktree_store::WorktreeStoreEvent;
-use ui::{h_flex, prelude::*, IconButton, IconSize, Tooltip};
+use ui::{IconButton, IconSize, Tooltip, h_flex, prelude::*};
 use workspace::{HideStatusItem, ItemHandle, StatusItemView, Workspace};
 
 use crate::scaffold;
@@ -15,17 +15,24 @@ use crate::scaffold;
 const EMBEDDED_ADAPTER: &str = "yz61-embedded";
 
 /// 定位工程里的 main 函数并在其所在行添加断点（已存在则不动）。
-/// 失败静默跳过（找不到 main 或无法打开 buffer 都不阻断调试启动）。
-async fn ensure_main_breakpoint(
-    workspace: &gpui::WeakEntity<Workspace>,
-    cx: &mut gpui::AsyncApp,
-) {
+/// 找不到 main 或无法打开 buffer 时记日志跳过，不阻断调试启动。
+async fn ensure_main_breakpoint(workspace: &gpui::WeakEntity<Workspace>, cx: &mut gpui::AsyncApp) {
     let open_task = workspace.update(cx, |workspace, cx| {
         let Some(worktree) = workspace.visible_worktrees(cx).next() else {
             return None;
         };
         let root = worktree.read(cx).abs_path().to_path_buf();
-        let main_rel = scaffold::find_main_source(&root)?;
+        let main_rel = match scaffold::find_main_source(&root) {
+            Some(rel) => rel,
+            None => {
+                log::warn!(
+                    "embedded_support: no main() source found under {}",
+                    root.display()
+                );
+                return None;
+            }
+        };
+        log::info!("embedded_support: main() source resolved to {main_rel}");
         let worktree_id = worktree.read(cx).id();
         let rel_path = util::rel_path::RelPath::from_unix_str(&main_rel).ok()?;
         let project = workspace.project().clone();
@@ -44,6 +51,7 @@ async fn ensure_main_breakpoint(
         return;
     };
     let Ok(buffer) = open_task.await else {
+        log::warn!("embedded_support: failed to open main() source buffer");
         return;
     };
     let _ = workspace.update(cx, |workspace, cx| {
@@ -52,13 +60,17 @@ async fn ensure_main_breakpoint(
         };
         let buffer_snapshot = buffer.read(cx).snapshot();
         let text = buffer_snapshot.text();
-        let Some(row) = text
+        let Some(sig_row) = text
             .lines()
             .position(|line| line.contains("int main(") || line.contains("void main("))
         else {
+            log::warn!("embedded_support: no int main( line in opened main() source");
             return;
         };
-        let row = row as u32;
+        let sig_row = sig_row as u32;
+        // 断点不打在 main 签名行（非可执行语句，可能不绑定），
+        // 而是打在 `{` 之后的第一条语句上。
+        let row = scaffold::main_body_first_statement_row(&text).unwrap_or(sig_row);
         let breakpoint_store = workspace
             .project()
             .read(cx)
@@ -67,8 +79,33 @@ async fn ensure_main_breakpoint(
             .breakpoint_store()
             .clone();
         let Some(abs_path) = BreakpointStore::abs_path_from_buffer(&buffer, cx) else {
+            log::warn!("embedded_support: main() source buffer has no absolute path");
             return;
         };
+        // 老版本把断点打在签名行上：把它清掉，避免留在原处干扰。
+        if row != sig_row
+            && breakpoint_store
+                .read(cx)
+                .breakpoint_at_row(&abs_path, sig_row, cx)
+                .is_some()
+        {
+            let sig_anchor = buffer_snapshot.anchor_after(language::PointUtf16::new(sig_row, 0));
+            breakpoint_store.update(cx, |store, cx| {
+                store.toggle_breakpoint(
+                    buffer.clone(),
+                    BreakpointWithPosition {
+                        position: sig_anchor,
+                        bp: Breakpoint::new_standard(),
+                    },
+                    BreakpointEditAction::Toggle,
+                    cx,
+                );
+            });
+            log::info!(
+                "embedded_support: removed stale main-signature breakpoint at row {}",
+                sig_row + 1
+            );
+        }
         if breakpoint_store
             .read(cx)
             .breakpoint_at_row(&abs_path, row, cx)
@@ -112,14 +149,15 @@ impl EmbeddedButtons {
             _worktree_subscription: None,
         };
         let project = workspace.project().clone();
-        let worktree_store = project.read(cx).worktree_store().clone();
+        let worktree_store = project.read(cx).worktree_store();
         this._worktree_subscription =
-            Some(cx.subscribe(&worktree_store, |this, _, event, cx| match event {
-                WorktreeStoreEvent::WorktreeAdded(_) | WorktreeStoreEvent::WorktreeUpdatedEntries(..) => {
-                    this.refresh(cx)
-                }
-                _ => {}
-            }));
+            Some(
+                cx.subscribe(&worktree_store, |this, _, event, cx| match event {
+                    WorktreeStoreEvent::WorktreeAdded(_)
+                    | WorktreeStoreEvent::WorktreeUpdatedEntries(..) => this.refresh(cx),
+                    _ => {}
+                }),
+            );
         // 初始扫描完成后做首次检测。
         cx.spawn_in(window, async move |this, cx| {
             let _ = project
@@ -176,7 +214,9 @@ impl EmbeddedButtons {
                 task_name,
                 reveal_target: None,
             },
-            None => tasks_ui::Spawn::ViaModal { reveal_target: None },
+            None => tasks_ui::Spawn::ViaModal {
+                reveal_target: None,
+            },
         };
         window.dispatch_action(action.boxed_clone(), cx);
     }
@@ -187,8 +227,14 @@ impl EmbeddedButtons {
         };
         // 调试适配器由 yz61-embedded 扩展提供；扩展未加载时给出明确提示
         //（DebugPanel::start_session 对缺失适配器是静默返回的）。
-        if dap::DapRegistry::global(cx).adapter(EMBEDDED_ADAPTER).is_none() {
-            log::error!("embedded_support: adapter '{}' not registered", EMBEDDED_ADAPTER);
+        if dap::DapRegistry::global(cx)
+            .adapter(EMBEDDED_ADAPTER)
+            .is_none()
+        {
+            log::error!(
+                "embedded_support: adapter '{}' not registered",
+                EMBEDDED_ADAPTER
+            );
             workspace.update(cx, |workspace, cx| {
                 workspace.show_error(
                     anyhow::anyhow!(
@@ -206,8 +252,8 @@ impl EmbeddedButtons {
         };
 
         cx.spawn_in(window, async move |_, cx| {
-            let Ok((task_contexts_fut, inventory)) = workspace
-                .update_in(cx, |workspace, window, cx| {
+            let Ok((task_contexts_fut, inventory)) =
+                workspace.update_in(cx, |workspace, window, cx| {
                     let task_contexts = tasks_ui::task_contexts(workspace, window, cx);
                     let inventory = workspace
                         .project()
@@ -236,16 +282,35 @@ impl EmbeddedButtons {
                     inventory.list_debug_scenarios(&contexts, vec![], vec![], false, cx)
                 })
                 .await;
-            let (scenarios, _) = listing;
+            // (最近启动过的场景, .zed/debug.json 里的文件级场景)。
+            // 只有后者跨进程保留；重启后 recent 为空，必须同时查它。
+            let (recent, file_based) = listing;
             log::info!(
-                "embedded_support: {} debug scenario(s) found",
-                scenarios.len()
+                "embedded_support: {} debug scenario(s) found ({} recent, {} from debug.json)",
+                recent.len() + file_based.len(),
+                recent.len(),
+                file_based.len()
             );
-            let chosen = scenarios
+            let chosen = recent
                 .iter()
                 .find(|(scenario, _)| scenario.adapter == EMBEDDED_ADAPTER)
-                .or_else(|| scenarios.first())
-                .cloned();
+                .map(|(scenario, context)| (scenario.clone(), Some(context.clone())))
+                .or_else(|| {
+                    file_based
+                        .iter()
+                        .find(|(_, scenario)| scenario.adapter == EMBEDDED_ADAPTER)
+                        .map(|(_, scenario)| (scenario.clone(), None))
+                })
+                .or_else(|| {
+                    recent
+                        .first()
+                        .map(|(scenario, context)| (scenario.clone(), Some(context.clone())))
+                        .or_else(|| {
+                            file_based
+                                .first()
+                                .map(|(_, scenario)| (scenario.clone(), None))
+                        })
+                });
             let Some((scenario, context)) = chosen else {
                 // 一个场景都没查到（例如 debug.json 尚未加载进 Inventory）：
                 // 回退到官方面板，避免按钮无反应。
@@ -257,6 +322,16 @@ impl EmbeddedButtons {
                     .ok();
                 return;
             };
+            // 文件级场景没有现成上下文，按官方 new_process_modal 的方式构造。
+            let context = context.unwrap_or_else(|| project::DebugScenarioContext {
+                task_context: contexts
+                    .active_context()
+                    .cloned()
+                    .map(Into::into)
+                    .unwrap_or_default(),
+                active_buffer: None,
+                worktree_id: contexts.worktree(),
+            });
 
             // 启动前确保 main 处有断点：launch 后 Zed 会在 configurationDone 前
             // 把断点发给 probe-rs，固件跑到 main 即停（等效“停在入口”）。

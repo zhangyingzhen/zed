@@ -458,10 +458,14 @@ impl ActivityIndicator {
             .sessions()
             .find(|s| !s.read(cx).is_started())
         {
+            let session = session.read(cx);
             return Some(Content {
                 icon: ActivityIcon::LoadingSpinner,
-                message: format!("Debug: {}", session.read(cx).adapter()),
-                tooltip_message: session.read(cx).label().map(|label| label.to_string()),
+                message: format!(
+                    "Debug: {}",
+                    session.label().unwrap_or_else(|| session.adapter().0)
+                ),
+                tooltip_message: session.label().map(|label| label.to_string()),
                 on_click: None,
             });
         }

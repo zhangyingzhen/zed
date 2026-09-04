@@ -3,29 +3,31 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use gpui::{App, Context};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use workspace::Workspace;
 
 pub fn init(cx: &mut App) {
-    cx.observe_new(|workspace: &mut Workspace, _window, cx: &mut Context<Workspace>| {
-        let project = workspace.project().clone();
-        cx.spawn(async move |workspace, cx| {
-            let _ = project
-                .update(cx, |project, cx| project.wait_for_initial_scan(cx))
-                .await;
-            let outcome = workspace.update(cx, |workspace, cx| generate(workspace, cx));
-            match outcome {
-                Ok(Ok(Some(message))) => log::info!("embedded_support: {message}"),
-                Ok(Err(error)) => {
-                    log::warn!("embedded_support: 生成配置失败: {error:#}")
+    cx.observe_new(
+        |workspace: &mut Workspace, _window, cx: &mut Context<Workspace>| {
+            let project = workspace.project().clone();
+            cx.spawn(async move |workspace, cx| {
+                let _ = project
+                    .update(cx, |project, cx| project.wait_for_initial_scan(cx))
+                    .await;
+                let outcome = workspace.update(cx, |workspace, cx| generate(workspace, cx));
+                match outcome {
+                    Ok(Ok(Some(message))) => log::info!("embedded_support: {message}"),
+                    Ok(Err(error)) => {
+                        log::warn!("embedded_support: 生成配置失败: {error:#}")
+                    }
+                    _ => {}
                 }
-                _ => {}
-            }
-        })
-        .detach();
-    })
+            })
+            .detach();
+        },
+    )
     .detach();
 }
 
@@ -64,7 +66,11 @@ pub fn read_tasks_labels(root: &Path) -> Vec<String> {
     });
     tasks
         .iter()
-        .filter_map(|task| task.get("label").and_then(Value::as_str).map(str::to_string))
+        .filter_map(|task| {
+            task.get("label")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .collect()
 }
 
@@ -200,7 +206,12 @@ fn discover_presets(root: &Path) -> Vec<Preset> {
     };
     presets
         .iter()
-        .filter(|preset| !preset.get("hidden").and_then(Value::as_bool).unwrap_or(false))
+        .filter(|preset| {
+            !preset
+                .get("hidden")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
         .filter_map(|preset| {
             let name = preset.get("name").and_then(Value::as_str)?.to_string();
             let build_dir_rel = preset
@@ -248,11 +259,7 @@ fn project_name(root: &Path) -> Option<String> {
         .next()?
         .trim_matches(|c: char| c == '"' || c == '\'')
         .to_string();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 // ---------- 任务/场景生成 ----------
@@ -359,12 +366,7 @@ fn preset_debug(presets: &[Preset]) -> Value {
     )
 }
 
-fn default_tasks(
-    cmake: &str,
-    size: &str,
-    probe_rs: &str,
-    config: &Option<Value>,
-) -> Value {
+fn default_tasks(cmake: &str, size: &str, probe_rs: &str, config: &Option<Value>) -> Value {
     let config = config.clone().unwrap_or_else(|| json!({}));
     let build_dir = config
         .get("buildDir")
@@ -535,13 +537,16 @@ fn find_file(dir: &Path, name: &str, depth: u8) -> Option<PathBuf> {
 }
 
 /// 在工程里定位含 `int main(` 的 C 源文件，返回 worktree 相对的 unix 风格路径。
-/// 优先常见路径，其次浅层递归（跳过 build/.git 等目录）。
+/// 优先常见路径与 `User/` 子树（本脚手架约定 CubeMX 的 main.c 不含 main()，
+/// 入口由 User/ 提供），最后浅层递归（跳过 build/Examples 等目录）。
 pub fn find_main_source(root: &Path) -> Option<String> {
     let candidates = [
+        "User/app/app_main.c",
+        "User/main.c",
+        "User/src/main.c",
         "Core/Src/main.c",
         "src/main.c",
         "Src/main.c",
-        "User/main.c",
         "main.c",
     ];
     for candidate in candidates {
@@ -550,28 +555,51 @@ pub fn find_main_source(root: &Path) -> Option<String> {
             return Some(candidate.to_string());
         }
     }
+    // User/ 子树浅搜：入口约定在 User/ 下，但文件名/层级可能不同。
+    let mut found = None;
+    walk(&root.join("User"), root, 4, &mut found);
+    if found.is_some() {
+        return found;
+    }
+    // 其余目录浅搜，跳过构建产物与三方库中的示例/测试源（常含诱饵 main）。
+    walk(root, root, 5, &mut found);
+    return found;
+
     fn walk(dir: &Path, root: &Path, depth: u8, found: &mut Option<String>) {
-        if depth == 0 || found.is_some() {
+        if depth == 0 || found.is_some() || !dir.is_dir() {
             return;
         }
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
+        let mut names: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        names.sort();
         let mut subdirs = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
+        for path in &names {
+            let file_name = path.file_name();
+            let name = file_name
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             if path.is_dir() {
                 if matches!(
-                    name.as_ref(),
-                    "build" | ".git" | ".zed" | "Drivers" | "Middlewares" | "node_modules"
+                    name.as_str(),
+                    "build"
+                        | ".git"
+                        | ".zed"
+                        | "Drivers"
+                        | "Middlewares"
+                        | "node_modules"
+                        | "Examples"
+                        | "examples"
+                        | "Test"
+                        | "Tests"
+                        | "templates"
                 ) || name.starts_with('.')
                 {
                     continue;
                 }
-                subdirs.push(path);
-            } else if name.as_ref().ends_with(".c") && source_contains_main(&path) {
+                subdirs.push(path.clone());
+            } else if name.ends_with(".c") && source_contains_main(path) {
                 if let Ok(rel) = path.strip_prefix(root) {
                     *found = Some(rel.to_string_lossy().replace('\\', "/"));
                 }
@@ -585,9 +613,6 @@ pub fn find_main_source(root: &Path) -> Option<String> {
             }
         }
     }
-    let mut found = None;
-    walk(root, root, 5, &mut found);
-    found
 }
 
 fn source_contains_main(path: &Path) -> bool {
@@ -596,4 +621,154 @@ fn source_contains_main(path: &Path) -> bool {
     };
     text.lines()
         .any(|line| line.contains("int main(") || line.contains("void main("))
+}
+
+/// 返回 main 函数体内第一条语句所在的 0 基行号。
+/// main 签名行本身不是可执行语句，断点打在那里可能不绑定；从签名行向后
+/// 找到 `{`，再跳过空行、注释与预处理行，落在第一条语句上。
+/// 找不到 `{` 或语句时回退（签名行 / `{` 行）。
+pub fn main_body_first_statement_row(text: &str) -> Option<u32> {
+    let lines: Vec<&str> = text.lines().collect();
+    let main_row = lines
+        .iter()
+        .position(|line| line.contains("int main(") || line.contains("void main("))?;
+    let brace_row = lines
+        .iter()
+        .enumerate()
+        .skip(main_row)
+        .find(|(_, line)| line.contains('{'))
+        .map(|(i, _)| i)
+        .unwrap_or(main_row);
+    let mut in_block_comment = false;
+    for (i, line) in lines.iter().enumerate().skip(brace_row + 1) {
+        let mut trimmed = line.trim();
+        if in_block_comment {
+            match trimmed.find("*/") {
+                Some(end) => {
+                    in_block_comment = false;
+                    trimmed = trimmed[end + 2..].trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                }
+                None => continue,
+            }
+        }
+        if trimmed.starts_with("//") || trimmed.starts_with('*') {
+            continue;
+        }
+        if trimmed.starts_with("/*") {
+            if !trimmed[2..].contains("*/") {
+                in_block_comment = true;
+            }
+            continue;
+        }
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+        // 函数体结束（空函数体等）：回退到 `{` 行。
+        if trimmed.starts_with('}') {
+            break;
+        }
+        return Some(i as u32);
+    }
+    Some(brace_row as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_main_source, main_body_first_statement_row};
+    use std::fs;
+
+    /// 复刻 ly3015 布局：CubeMX main.c 无 main()，真入口在 User/app/app_main.c，
+    /// Packages/rtt/Examples 里还有个（被 gitignore 的）诱饵 main。
+    #[test]
+    fn find_main_source_prefers_user_entry_over_decoys() {
+        let root = tempfile::tempdir().unwrap();
+        let write = |rel: &str, body: &str| {
+            let path = root.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        };
+        write(
+            "MCUs/stm32f407vgt6/Core/Src/main.c",
+            "/* CubeMX: no main() here */\nvoid SystemClock_Config(void){}\n",
+        );
+        write(
+            "Packages/rtt/Examples/Main_RTT_SpeedTestApp.c",
+            "int main(void){}\n",
+        );
+        write(
+            "User/app/app_main.c",
+            "#include \"main.h\"\nint main(void){}\n",
+        );
+
+        let found = find_main_source(root.path());
+        assert_eq!(
+            found.as_deref(),
+            Some("User/app/app_main.c"),
+            "must pick the User entry, not the Packages example decoy"
+        );
+    }
+
+    #[test]
+    fn find_main_source_plain_layouts() {
+        let root = tempfile::tempdir().unwrap();
+        let write = |rel: &str, body: &str| {
+            let path = root.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        };
+        assert_eq!(find_main_source(root.path()), None);
+        write("Core/Src/main.c", "int main(void){}\n");
+        assert_eq!(
+            find_main_source(root.path()),
+            Some("Core/Src/main.c".into())
+        );
+
+        let root2 = tempfile::tempdir().unwrap();
+        let path = root2.path().join("src/main.c");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "int main(void){}\n").unwrap();
+        assert_eq!(find_main_source(root2.path()), Some("src/main.c".into()));
+    }
+
+    /// app_main.c 的真实形状（此处压缩到文件头部）：签名行后是 `{`、
+    /// 块注释、第一条语句 HAL_Init()。
+    #[test]
+    fn main_body_row_lands_on_first_statement() {
+        let text = "\
+#include \"main.h\"
+
+int main(void)
+{
+    /* 1. HAL 与时钟 */
+    HAL_Init();
+    SystemClock_Config();
+}";
+        assert_eq!(main_body_first_statement_row(text), Some(5));
+    }
+
+    #[test]
+    fn main_body_row_edge_cases() {
+        // `{` 与签名同行：第一条语句在下一行。
+        assert_eq!(
+            main_body_first_statement_row("int main(void) {\n    foo();\n}"),
+            Some(1)
+        );
+        // 没有独立语句（空函数体）：回退到 `{` 行。
+        assert_eq!(
+            main_body_first_statement_row("int main(void)\n{\n}\n"),
+            Some(1)
+        );
+        // 没有 main：None。
+        assert_eq!(main_body_first_statement_row("int foo(void){}\n"), None);
+        // 语句前的多行注释与预处理行都被跳过。
+        assert_eq!(
+            main_body_first_statement_row(
+                "int main(void)\n{\n/* a\nb */\n#ifdef X\n#endif\nrun();\n}"
+            ),
+            Some(6)
+        );
+    }
 }
